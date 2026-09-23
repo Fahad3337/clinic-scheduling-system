@@ -54,6 +54,12 @@ dependencies = [
     # inbound SMS. Found by the webhook tests, which is exactly why they
     # exercise the endpoint rather than the handler function.
     "python-multipart>=0.0.9",
+    # Staff dashboard (read-mostly, server-rendered): Jinja2 templates
+    # served directly by this same FastAPI app. No SPA, no separate
+    # build/deploy step, no new frontend project -- deliberately, this
+    # is a thin operational view (upcoming appointments, the escalation
+    # queue, calendar connection health), not a product UI.
+    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,46 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 # not FastAPI's default "Not authenticated" -- keeps every auth failure on
 # this API shaped the same way regardless of which check caught it.
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class WebAuthRequired(Exception):
+    """Raised by the cookie-based dashboard dependency in place of a bare
+    401 -- see app/web/dashboard.py's exception handler, which turns this
+    into a redirect to the login page. A browser tab is not an API
+    client; a raw 401 JSON body is not a usable response to it."""
+
+
+async def _resolve_staff(token: str | None, db: AsyncSession) -> StaffAccount:
+    """Shared token -> live StaffAccount resolution.
+
+    THE ONE COPY of this check. get_current_staff (bearer header, for API
+    clients) and get_current_staff_from_cookie (for the dashboard) both
+    call this rather than each re-implementing "decode, then look up,
+    then check active" -- two copies of an auth check is exactly the kind
+    of duplication that drifts silently when only one gets a fix later
+    (see the identical reasoning for _validate_twilio_request in
+    api/v1/webhooks.py). Raises InvalidTokenError / StaffAccountInactiveError
+    style failures as plain ValueError; callers translate to whatever
+    shape their transport needs (401 JSON vs. a redirect).
+    """
+    if not token:
+        raise ValueError("missing token")
+
+    try:
+        account_id: UUID = auth_service.decode_access_token(token)
+    except InvalidTokenError as exc:
+        raise ValueError(str(exc)) from exc
+
+    account = await db.get(StaffAccount, account_id)
+    if account is None:
+        # The account behind a still-validly-signed token was deleted.
+        # Treat identically to "deactivated" -- both mean "this token no
+        # longer represents anyone who may act".
+        raise ValueError("account no longer exists")
+    if not account.is_active:
+        raise ValueError("account is deactivated")
+
+    return account
 
 
 async def get_current_staff(
@@ -60,24 +100,39 @@ async def get_current_staff(
             "Missing bearer token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
     try:
-        account_id: UUID = auth_service.decode_access_token(credentials.credentials)
-    except InvalidTokenError as exc:
+        return await _resolve_staff(credentials.credentials, db)
+    except ValueError as exc:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, str(exc), headers={"WWW-Authenticate": "Bearer"}
         ) from exc
 
-    account = await db.get(StaffAccount, account_id)
-    if account is None:
-        # The account behind a still-validly-signed token was deleted.
-        # Treat identically to "deactivated" -- both mean "this token no
-        # longer represents anyone who may act".
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account no longer exists")
-    if not account.is_active:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account is deactivated")
 
-    return account
+# The dashboard's session cookie. HttpOnly (JS cannot read it -- the whole
+# point, XSS mitigation) and SameSite=lax (a cross-site POST does not carry
+# it, which is real CSRF protection for the reopen action's form submit
+# without needing a separate CSRF token for this first cut -- SameSite=lax
+# cookies ARE sent on top-level cross-site GET navigation, never on a
+# cross-site POST). `secure` is tied to DEBUG, same reasoning as elsewhere
+# in this codebase: local dev runs over plain http, so a Secure-only cookie
+# would silently never be sent there.
+DASHBOARD_COOKIE_NAME = "clinic_staff_session"
+
+
+async def get_current_staff_from_cookie(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> StaffAccount:
+    """Cookie-equivalent of get_current_staff, for server-rendered
+    dashboard pages. Fails closed exactly the same way -- the only
+    difference from the API dependency is WHAT gets raised on failure
+    (WebAuthRequired, turned into a redirect) and WHERE the token comes
+    from, not whether the check happens."""
+    token = request.cookies.get(DASHBOARD_COOKIE_NAME)
+    try:
+        return await _resolve_staff(token, db)
+    except ValueError as exc:
+        raise WebAuthRequired(str(exc)) from exc
 
 
 def assert_doctor_scope(staff: StaffAccount, doctor_id: UUID) -> None:

@@ -43,6 +43,12 @@ below.
   terminal conversations can be deliberately reopened without ever
   resurrecting a prior identity, both enforced at the schema level, not
   just in application logic.
+- **A staff dashboard** — server-rendered, cookie-authenticated, no
+  separate frontend project: upcoming appointments (doctor-scoped the
+  same way the JSON API is), the live escalation queue with a working
+  reopen button that calls the exact same service function the JSON API
+  does, and calendar connection health per doctor. Thin on purpose — see
+  [`app/web/dashboard.py`](app/web/dashboard.py).
 
 ## Why this project is worth reading
 
@@ -168,9 +174,9 @@ docker compose exec api alembic upgrade head
 ```
 
 API on `localhost:8000`, Postgres on `localhost:5434` (5432 is commonly
-already taken locally). Create a staff account with
-`python scripts/create_staff_account.py` before hitting any
-authenticated endpoint.
+already taken locally). Staff dashboard at `localhost:8000/dashboard`.
+Create a staff account with `python scripts/create_staff_account.py`
+before hitting any authenticated endpoint or logging into the dashboard.
 
 ```bash
 # tests (spins its own Postgres via TEST_DATABASE_URL, see tests/conftest.py)

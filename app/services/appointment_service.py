@@ -32,6 +32,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.appointment import Appointment
 from app.models.appointment_external_event import AppointmentExternalEvent
@@ -311,6 +312,48 @@ async def get_appointment(session: AsyncSession, appointment_id: UUID) -> Appoin
     if appointment is None:
         raise AppointmentNotFoundError(appointment_id)
     return appointment
+
+
+async def list_upcoming(
+    session: AsyncSession,
+    *,
+    doctor_id: UUID | None = None,
+    now: datetime | None = None,
+    limit: int = 100,
+) -> list[Appointment]:
+    """Booked appointments starting from now onward, soonest first.
+
+    Read-only, for the staff dashboard (app/web/dashboard.py). `doctor_id`
+    is filtered directly on `Appointment.doctor_id` -- the denormalized
+    column documented at the top of this model, exactly for queries like
+    this one, not via a join through time_slot.
+
+    Eager-loads patient/doctor/time_slot: this result gets handed straight
+    to a template that reads `.patient.full_name`, `.doctor.full_name` and
+    `.time_slot.starts_at`, and touching a relationship without eager
+    loading in async code is a cold-identity-map crash waiting to happen,
+    not a lazy-loading convenience -- see the standing convention on this
+    throughout the test suite.
+    """
+    now = now or datetime.now(UTC)
+    stmt = (
+        select(Appointment)
+        .join(TimeSlot, Appointment.time_slot_id == TimeSlot.id)
+        .where(
+            Appointment.status == AppointmentStatus.BOOKED,
+            TimeSlot.starts_at >= now,
+        )
+        .order_by(TimeSlot.starts_at.asc())
+        .limit(limit)
+        .options(
+            selectinload(Appointment.patient),
+            selectinload(Appointment.doctor),
+            selectinload(Appointment.time_slot),
+        )
+    )
+    if doctor_id is not None:
+        stmt = stmt.where(Appointment.doctor_id == doctor_id)
+    return list((await session.scalars(stmt)).all())
 
 
 async def cancel_appointment(

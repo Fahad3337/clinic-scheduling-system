@@ -34,6 +34,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.models.conversation import MAX_IDENTITY_ATTEMPTS, Conversation
@@ -475,6 +476,25 @@ async def reopen(
     await session.commit()
     logger.info("conversation %s reopened by staff %s", conversation.id, staff_id)
     return conversation
+
+
+async def list_escalated(session: AsyncSession, *, limit: int = 50) -> list[Conversation]:
+    """Conversations currently waiting on a human, most recent first.
+
+    Read-only, for the staff dashboard (app/web/dashboard.py) -- the
+    reopen action itself still goes through `reopen()` above, never
+    through this listing. Eager-loads `patient` (may be NULL -- an
+    escalation from a lockout never bound one) so the template can show
+    a name without a lazy load.
+    """
+    stmt = (
+        select(Conversation)
+        .where(Conversation.status == ConversationStatus.ESCALATED)
+        .order_by(Conversation.last_activity_at.desc())
+        .limit(limit)
+        .options(selectinload(Conversation.patient))
+    )
+    return list((await session.scalars(stmt)).all())
 
 
 def _first_name(patient: Patient | None) -> str | None:
