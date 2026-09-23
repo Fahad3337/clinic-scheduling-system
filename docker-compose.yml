@@ -1,0 +1,118 @@
+# Local dev only. WHY no secrets manager / prod hardening here: this compose
+# file's only job is "clone the repo, run one command, get a working stack".
+# Production deployment (real credentials, TLS, connection pooler like
+# pgbouncer in front of Postgres) is out of scope for Phase 1.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: clinic
+      POSTGRES_PASSWORD: clinic
+      POSTGRES_DB: clinic
+    ports:
+      # Host port 5434, not 5432: 5432 is commonly already taken by another
+      # project's Postgres (it is on this machine). The container still
+      # listens on 5432 internally, and the api service reaches it as
+      # db:5432 over the compose network -- this mapping only affects tools
+      # connecting from the host, e.g.
+      #   psql -h localhost -p 5434 -U clinic -d clinic
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # WHY a healthcheck + depends_on.condition below, instead of just
+      # depends_on: [db]: Postgres' container is "up" (accepting TCP) well
+      # before it's actually ready to accept queries during first init. The
+      # api container would otherwise race Postgres' own startup and crash-
+      # loop on the first `alembic upgrade`.
+      test: ["CMD-SHELL", "pg_isready -U clinic -d clinic"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    # Runs migrations before serving -- fine for local dev where there's one
+    # replica. REVISIT for prod: with multiple API replicas, N containers
+    # racing `alembic upgrade head` on boot needs a migration lock or a
+    # separate one-shot migration job/init container, not each replica
+    # running it independently.
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    # Secrets come from .env (gitignored): TOKEN_ENCRYPTION_KEYS, Google /
+    # Twilio / SendGrid credentials. The `environment:` block below takes
+    # precedence over env_file, which is why DATABASE_URL here correctly
+    # overrides the host-oriented one in .env.
+    #
+    # WHY env_file rather than listing each secret as ${VAR}: compose would
+    # substitute a missing ${VAR} to an empty string with only a warning, so
+    # a typo'd name silently yields an unconfigured app. env_file passes the
+    # file through verbatim and keeps secrets out of `docker compose config`
+    # output, which people paste into issues.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://clinic:clinic@db:5432/clinic
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - ./alembic:/app/alembic
+    depends_on:
+      db:
+        condition: service_healthy
+    # WHY the api needs a healthcheck: the worker waits on it. The api runs
+    # `alembic upgrade head` before serving, so "api is healthy" is the
+    # signal that the schema is ready. Without it the worker races the
+    # migration and crash-loops against a half-built database.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          sys.exit(0 if urllib.request.urlopen("http://localhost:8000/health", timeout=3).status == 200 else 1)
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # ------------------------------------------------------------------ #
+  # Background jobs. See app/worker.py for why this is its own process
+  # and why it needs neither Redis nor a persistent job store.
+  # ------------------------------------------------------------------ #
+  worker:
+    build: .
+    command: python -m app.worker
+    # EXACTLY ONE REPLICA, deliberately. Every job is a poller, so N
+    # replicas would each do the same work N times -- wasteful, though NOT
+    # incorrect: the database guarantees (UNIQUE(dedupe_key),
+    # FOR UPDATE SKIP LOCKED, ON CONFLICT) make duplicate execution
+    # harmless. That is what lets this stay a single plain container
+    # instead of needing a distributed lock.
+    #
+    # It deliberately does NOT run migrations -- two containers racing
+    # `alembic upgrade head` is the multi-replica problem noted on the api
+    # service. It waits for the api to be healthy instead, which happens
+    # only after migrations have completed.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DEBUG: "false"
+      DATABASE_URL: postgresql+asyncpg://clinic:clinic@db:5432/clinic
+    volumes:
+      - ./app:/app/app
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

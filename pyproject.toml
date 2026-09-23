@@ -1,0 +1,83 @@
+[project]
+name = "clinic-scheduling-api"
+version = "0.1.0"
+description = "A clinic scheduling system: booking API, two-way Google Calendar sync, and an SMS/voice chatbot with a structurally-enforced identity and safety model."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy[asyncio]>=2.0.35",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "pydantic[email]>=2.8",   # [email] -> email-validator, needed by EmailStr (patients + staff login)
+    "pydantic-settings>=2.4",
+    # Phase 2
+    "cryptography>=43.0",            # Fernet encryption for OAuth tokens at rest
+    "apscheduler>=3.10,<4",          # background jobs; see worker notes on 3.x vs 4.x
+    "httpx>=0.27",                   # all outbound HTTP: Google, Twilio, SendGrid
+    # NOTE: neither the official Google client libraries (google-auth,
+    # google-api-python-client) nor the twilio/sendgrid SDKs are
+    # dependencies. All three targets are reached via plain httpx (see
+    # app/integrations/) -- the REST surface used is small, and the
+    # official Google/Twilio clients are synchronous, which would block
+    # the event loop. google-auth and google-api-python-client were
+    # listed here through Phase 2 planning and never actually imported;
+    # removed rather than left as unused supply-chain surface -- same
+    # reasoning that removed twilio/sendgrid. Re-add only for a concrete
+    # need (e.g. Twilio webhook signature validation in Phase 4).
+    # Phase 3: authentication
+    "bcrypt>=4.2",                   # password hashing. Minimal, no C toolchain surprises, no CryptContext layer
+    "pyjwt>=2.9",                    # JWT issuance/verification. Deliberately not python-jose (heavier, worse CVE history)
+    # Phase 3: Twilio webhook signature validation ONLY.
+    #
+    # This dependency was deliberately REMOVED earlier with the note
+    # "re-add in Phase 4 if webhook signature validation is wanted --
+    # that is a real reason to take the dependency". That condition is
+    # now met, and the reasoning that removed it does not apply to this
+    # use: the objection was that the SDK's HTTP client is synchronous
+    # and would block the event loop. RequestValidator does no I/O at
+    # all -- it is an HMAC over a canonical string.
+    #
+    # And it is specifically the CANONICALIZATION we want from them, not
+    # the crypto. Building the signed string (url + params sorted and
+    # concatenated, with the exact URL Twilio saw) is the error-prone
+    # part, and getting it subtly wrong yields a validator that rejects
+    # everything or, far worse, accepts everything. Having just been
+    # burned transcribing an API by hand, hand-rolling a security
+    # control's canonical form would be the same mistake with a worse
+    # blast radius. Outbound SMS still goes through httpx.
+    "twilio>=9.2",
+    # Starlette needs this to parse form bodies, and Twilio posts
+    # application/x-www-form-urlencoded. Without it `await
+    # request.form()` raises at RUNTIME, not import time -- so the
+    # webhook would have deployed cleanly and failed on the first real
+    # inbound SMS. Found by the webhook tests, which is exactly why they
+    # exercise the endpoint rather than the handler function.
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "aiosqlite>=0.20",  # NOTE: unused by default -- tests run against real Postgres (see tests/conftest.py) because the double-booking test exercises Postgres-specific FOR UPDATE + partial-index locking that SQLite cannot reproduce.
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# WHY both pinned to session: the `engine` fixture in tests/conftest.py is
+# session-scoped (creating a fresh engine/schema per test would dominate
+# runtime). pytest-asyncio gives fixtures and test bodies independent loop
+# scopes -- fixture_loop_scope governs async fixtures, test_loop_scope
+# governs the test function itself. If only the fixture scope is raised, the
+# engine/connection pool is built on the session loop but each test body then
+# runs on its own function-scoped loop, and asyncpg connections handed across
+# that boundary corrupt ("cannot use Connection.transaction() in a manually
+# started transaction"). Both must match the engine's lifetime.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
