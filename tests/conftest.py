@@ -25,24 +25,26 @@ from __future__ import annotations
 import base64
 import os
 import secrets
-from datetime import UTC, datetime, timedelta
-from typing import AsyncIterator
 
-import httpx
-import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from app.core.config import get_settings
-from app.db.base import Base
-from app.db.session import build_engine, build_session_factory
-from app.models.doctor import Doctor
-from app.models.patient import Patient
-from app.models.time_slot import TimeSlot
-
-# Set BEFORE any `app.*` import so app.core.config picks it up. A Fernet key
-# is just urlsafe-base64 of 32 bytes, so we can mint one without importing
-# cryptography here.
+# TRULY BEFORE any `app.*` import -- these two lines must be the first
+# executable statements in this file, not just placed near the top. This
+# ordering bug was real, not theoretical: `app.db.session` calls the
+# `@lru_cache`-decorated `get_settings()` at MODULE level (to build its
+# `engine`/`SessionFactory` singletons), so importing it -- even via a
+# plain `from app.db.session import build_engine` -- caches a Settings
+# object from whatever the OS environment looks like at that exact
+# moment. If these setdefault calls run even one import after that, they
+# are setting `os.environ` too late; the cached Settings object already
+# has empty strings baked in for the rest of the process. This was
+# masked in every local and Docker run because the real dev `.env` file
+# always supplied a real JWT_SECRET_KEY before Python even started --
+# CI, with no `.env` file at all, was the first environment honest
+# enough to expose it. 12 auth-dependent tests failed with
+# `jwt.exceptions.InvalidKeyError: HMAC key must not be empty` the first
+# time this suite ever ran against a clean checkout.
+#
+# A Fernet key is just urlsafe-base64 of 32 bytes, so we can mint one
+# without importing cryptography here.
 #
 # WHY generate rather than hardcode: a committed key is a key that eventually
 # gets copy-pasted into a real deployment. A fresh one per run also proves
@@ -56,9 +58,24 @@ os.environ.setdefault(
     "TOKEN_ENCRYPTION_KEYS",
     base64.urlsafe_b64encode(os.urandom(32)).decode(),
 )
-# Same reasoning, same "set before any app import" requirement, for the
-# JWT signing key (Phase 3 auth).
+# Same reasoning, same "before any app import" requirement, for the JWT
+# signing key (Phase 3 auth).
 os.environ.setdefault("JWT_SECRET_KEY", secrets.token_urlsafe(48))
+
+from datetime import UTC, datetime, timedelta  # noqa: E402
+from typing import AsyncIterator  # noqa: E402
+
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: E402
+
+from app.core.config import get_settings  # noqa: E402
+from app.db.base import Base  # noqa: E402
+from app.db.session import build_engine, build_session_factory  # noqa: E402
+from app.models.doctor import Doctor  # noqa: E402
+from app.models.patient import Patient  # noqa: E402
+from app.models.time_slot import TimeSlot  # noqa: E402
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
