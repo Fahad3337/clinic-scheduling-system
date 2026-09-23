@@ -81,3 +81,17 @@ testpaths = ["tests"]
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+# EXPLICIT, not auto-discovered. Without this, setuptools' flat-layout
+# discovery finds `app/`, `alembic/`, `scripts/` and `tests/` all sitting
+# at the repo root and refuses to guess which one is the installable
+# package -- correctly. This never surfaced locally or in the Docker
+# build because the Dockerfile runs `pip install -e .` BEFORE `COPY . .`,
+# so only pyproject.toml exists at that point and the ambiguity isn't
+# there yet to detect. It only showed up the first time `pip install -e
+# ".[dev]"` ran against a full checkout, in CI. `alembic/` is not an
+# importable package -- migrations run via the `alembic` CLI against
+# alembic.ini's script_location, never via `import alembic_versions` or
+# similar -- so it, scripts/, and tests/ are deliberately excluded here.
+[tool.setuptools.packages.find]
+include = ["app*"]
