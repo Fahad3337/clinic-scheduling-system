@@ -90,6 +90,19 @@ async def test_successful_login_sets_cookie_and_redirects(client, front_desk_acc
     # jar -- checked directly on the Set-Cookie header instead.
     assert "HttpOnly" in resp.headers.get("set-cookie", "")
     assert "SameSite=lax" in resp.headers.get("set-cookie", "")
+    # THE REGRESSION THIS GUARDS: the cookie's Secure flag must track the
+    # scheme of THIS request (http, for the test client), not a `debug`
+    # config flag -- tying it to `debug` produced a Secure cookie in any
+    # environment where debug defaulted to False (CI, with no .env to
+    # set DEBUG=true), which a plain http client then correctly refused
+    # to resend, silently failing every authenticated dashboard test.
+    assert "Secure" not in resp.headers.get("set-cookie", "")
+
+    # And the property that actually matters, proven end to end rather
+    # than by inspecting the header alone: the cookie this client just
+    # received is USABLE on the very next request.
+    home = await client.get(HOME_PATH)
+    assert home.status_code == 200
 
 
 @pytest.mark.asyncio

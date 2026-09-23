@@ -1,0 +1,23 @@
+# CRITICAL: .gitignore has NO effect on `docker build` -- COPY . . copies
+# everything in the build context regardless of what git ignores. Found
+# the hard way: .env, with every real credential in it (Twilio, Gemini,
+# Fernet keys, JWT secret), had been baked directly into both the api and
+# worker images this entire session, because this file didn't exist.
+# Never assume .gitignore covers Docker too -- it is a completely
+# separate mechanism that Docker does not consult.
+.env
+.env.*
+!.env.example
+
+.git
+.github
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# NOT tests/ -- this project's own verification workflow runs pytest
+# INSIDE the built api image throughout (docker compose exec/run api
+# pytest), documented in the README. Excluding it would break that.
+docs/

@@ -38,7 +38,6 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import DASHBOARD_COOKIE_NAME, get_current_staff_from_cookie, get_db
-from app.core.config import get_settings
 from app.models.enums import StaffRole
 from app.models.staff_account import StaffAccount
 from app.services import appointment_service, auth_service, conversation_service, doctor_service
@@ -77,14 +76,33 @@ async def login_submit(
         )
 
     token, expires_at = auth_service.create_access_token(account)
-    settings = get_settings()
     response = RedirectResponse(url="/dashboard", status_code=303)
     response.set_cookie(
         DASHBOARD_COOKIE_NAME,
         token,
         httponly=True,
         samesite="lax",
-        secure=not settings.debug,
+        # Secure iff THIS request actually arrived over https -- not tied
+        # to the `debug` flag. That first version was wrong twice over:
+        # it made the cookie's security property depend on a general-
+        # purpose config flag instead of the one fact that actually
+        # matters (was this connection encrypted), and it broke silently
+        # in exactly the environment meant to catch that kind of thing --
+        # CI, where `debug` defaults to False with no .env to override
+        # it, produced a Secure cookie that a plain http://testserver
+        # client correctly refused to resend, failing 10 tests. Local
+        # Docker runs never caught it because a leaked .env (see
+        # .dockerignore -- fixed alongside this) baked DEBUG=true into
+        # the image, masking the bug the same way the real .env has now
+        # masked two earlier bugs in this project (the packaging fix,
+        # the JWT ordering fix) before CI caught them clean.
+        # FLAGGED: request.url.scheme reads the connection FastAPI itself
+        # terminated. Behind a TLS-terminating reverse proxy, that will
+        # read "http" even for a real https request unless the proxy's
+        # X-Forwarded-Proto is honored -- not implemented here, same
+        # class of gap as TWILIO_WEBHOOK_BASE_URL's note in core/config.py
+        # about request.url not reflecting what the client actually saw.
+        secure=request.url.scheme == "https",
         max_age=int((expires_at - datetime.now(UTC)).total_seconds()),
     )
     return response
