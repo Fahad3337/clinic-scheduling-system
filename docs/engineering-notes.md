@@ -110,3 +110,56 @@ and a direct quote from a live-fetched page.
 That is the actual test of whether a stated engineering discipline is
 real: not whether it appears in code comments, but whether it survives
 being turned on the person applying it.
+
+## The "push and verify CI is green" episode (2026-09-23)
+
+Publishing this repository meant, for the first time, running the test
+suite against a genuinely clean checkout — no local `.env`, no
+Dockerfile build-order accidents, nothing carried over from a long-lived
+development session. That turned out to be its own adversarial
+condition, distinct from anything local dev or Docker had ever actually
+exercised, and it found two real bugs on the very first push.
+
+**Bug 1: `pip install -e ".[dev]"` failed** with setuptools refusing to
+guess between `app/`, `alembic/`, `scripts/` and `tests/` all sitting at
+the repo root. Never caught before because the Dockerfile runs
+`pip install -e .` *before* `COPY . .` — the ambiguity a full checkout
+creates was simply never present at that point in any Docker build this
+project had ever run.
+
+**Bug 2, the more interesting one: 12 auth tests failed** with
+`jwt.exceptions.InvalidKeyError: HMAC key must not be empty`.
+`tests/conftest.py` carried a comment claiming its `JWT_SECRET_KEY`
+fallback was set "before any `app.*` import" — but the actual import
+order in the file put `from app.db.session import build_engine, ...`
+*first*, which calls the `@lru_cache`-decorated `get_settings()` at
+module level and caches an empty key before the fallback line ever
+runs. Locally, and in every Docker run all project, the real dev `.env`
+always supplied a real `JWT_SECRET_KEY` before Python even started, so
+the cached value was never actually empty — the ordering bug was true
+but silent. A clean CI checkout, with no `.env` at all, was the first
+environment honest enough to expose it.
+
+**This is the SAME finding as `for-update-needs-populate-existing`, from
+a different direction.** Both are a comment asserting a guarantee ("the
+lock is held", "this runs before any app import") that the code next to
+it does not actually provide. In both cases the comment was not
+decorative — someone had reasoned about the requirement correctly and
+then written code that didn't implement it, and nothing forced a
+re-check. The standing conclusion holds across both: a comment claiming
+an invariant is evidence someone once cared about it, not evidence
+anything currently enforces it. Audit the category this describes, not
+just the one instance that already bit you — that's twice now, in two
+unrelated parts of the codebase, caught by two different mechanisms (a
+concurrency stress test; a clean-environment CI run).
+
+**Clean-environment CI is now understood as a fifth verification
+surface** this project deliberately checks, alongside cold sessions
+(does code survive a fresh identity map, not a warm cache), recorded
+fixtures (does code survive the actual shape a real provider sends, not
+the shape assumed), and the config audit (does test config match
+production config, not just the three settings that already caused a
+problem). Each surface exists because something passed everywhere else
+and failed there first. None of them are redundant with the others —
+this project's whole track record is that they keep finding different
+bugs, not the same bug twice.
